@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ symbol }} - Probabilistic Pattern Model</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+             background:#050816;color:#e5e5e5;margin:0;padding:24px;}
+        h1,h2,h3{margin:0 0 12px 0;}
+        a{color:#7ee7ff;text-decoration:none;}
+        a:hover{text-decoration:underline;}
+        .card{background:#0b1020;border-radius:16px;padding:16px;margin-bottom:16px;
+              border:1px solid #1f2937;}
+        table{width:100%;border-collapse:collapse;margin-top:8px;font-size:13px;}
+        th,td{border:1px solid #272b3b;padding:6px;text-align:center;}
+        th{background:#111827;}
+        .conf-high{color:#22c55e;font-weight:600;}
+        .conf-mid{color:#eab308;font-weight:500;}
+        .conf-low{color:#f97316;font-weight:500;}
+        .tag{font-size:10px;color:#9ca3af;}
+        .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;}
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h1>{{ symbol }} — {{ date }}</h1>
+    <p class="tag">
+        Next-day probability is from a logistic model trained on historical indicators
+        and explicit patterns (divergence, double tops/bottoms, wedge).
+        Coefficients are in <code>Model/logit_model_T1.json</code>.
+    </p>
+    <table>
+        <tr><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th></tr>
+        <tr>
+            <td>{{ '%.2f'|format(ohlc.Open) }}</td>
+            <td>{{ '%.2f'|format(ohlc.High) }}</td>
+            <td>{{ '%.2f'|format(ohlc.Low) }}</td>
+            <td>{{ '%.2f'|format(ohlc.Close) }}</td>
+            <td>{{ '%.0f'|format(ohlc.Volume) }}</td>
+        </tr>
+    </table>
+</div>
+
+<div class="grid">
+    <div class="card">
+        <h3>Prediction Confidence</h3>
+        {% set val = conf['T1'] %}
+        {% if val >= 60 %}
+            {% set cls = 'conf-high' %}
+        {% elif val >= 45 %}
+            {% set cls = 'conf-mid' %}
+        {% else %}
+            {% set cls = 'conf-low' %}
+        {% endif %}
+        <table>
+            <tr><th>Horizon</th><th>Prob. Up (%)</th></tr>
+            <tr>
+                <td>Next day (T+1)</td>
+                <td class="{{ cls }}">{{ '%.1f'|format(val) }}</td>
+            </tr>
+        </table>
+        <p class="tag">
+            Statistical probability from past patterns, not a guarantee.
+        </p>
+    </div>
+
+    <div class="card">
+        <h3>Top drivers of today's signal</h3>
+        <table>
+            <tr><th>Feature</th><th>Weight β</th><th>|β·x|</th></tr>
+            {% for c in contrib['T1'] %}
+            <tr>
+                <td>{{ c.indicator }}</td>
+                <td>{{ '%.4f'|format(c.weight) }}</td>
+                <td>{{ '%.4f'|format(c.impact) }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+        <p class="tag">
+            Higher |β·x| means stronger influence on today's probability.
+        </p>
+    </div>
+</div>
+
+<div class="card">
+    <h3>Indicators and Patterns Snapshot</h3>
+    <table>
+        <tr><th>Feature</th><th>Value</th></tr>
+        {% for key,meta in indicators.items() %}
+        <tr>
+            <td>{{ meta.label }}</td>
+            <td>{{ '%.4f'|format(meta.value) }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+
+</body>
+</html>
