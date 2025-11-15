@@ -1,18 +1,14 @@
 # scripts/build_predictions_patterns.py
 #
-# Use the pattern table (pattern_stats_T123.json) to build:
-#   - dist/index.html
-#       * Top T+1 Up signals (by confidence, with support)
-#       * Top T+1 Down signals
-#   - dist/stocks/<SYMBOL>.html
-#       * Today's pattern, direction, hit-rate, confidence, support
-#       * Last 10 daily signals:
-#           - pattern on that day
-#           - its P_up_T1, confidence, support
-#           - predicted vs actual T+1/T+2/T+3
+# Reads:
+#   - Data/Historical/*.csv  (all stocks, long history)
+#   - Model/pattern_stats_T123.json (built by build_pattern_table.py)
 #
-# This backtests the model "day by day": for each of last 10 days,
-# what pattern was detected, what probability it gave, and whether it won.
+# Builds:
+#   - dist/stocks/<SYMBOL>.html   (per-stock multi-horizon page)
+#   - dist/index.html             (landing page with strongest T+1 Up / Down)
+#
+# Each stock page also shows last 10 daily signals, with actual vs predicted.
 
 from pathlib import Path
 import json
@@ -30,7 +26,7 @@ PATTERN_FILE = MODEL_DIR / "pattern_stats_T123.json"
 DIST_DIR = Path("dist")
 
 
-# ---------- master builder (same as in build_pattern_table) ----------
+# ---------- master builder (from per-symbol CSVs) ----------
 
 def build_master_from_per_symbol():
     if not HIST_DIR.exists():
@@ -302,7 +298,7 @@ def render_stock_page(row, pattern_info_today, history_rows, win_summary):
         "</table></div>",
     ]
 
-    # Today's signal (T+1/T+2/T+3 from today's pattern)
+    # Today's signal
     p_up_T2 = pattern_info_today.get("p_up_T2", 0.5)
     p_up_T3 = pattern_info_today.get("p_up_T3", 0.5)
     dir_T2, conf_T2 = direction_and_confidence(p_up_T2)
@@ -432,7 +428,8 @@ def main():
 
     summary_rows = []
 
-    MIN_SUPPORT_FOR_LISTING = 20  # tune as you like
+    # We now accept ALL patterns for the landing page
+    MIN_SUPPORT_FOR_LISTING = 1
 
     for sym, g in df.groupby("Symbol", sort=False):
         g_ind = compute_basic_indicators(g)
@@ -495,13 +492,18 @@ def main():
         last = g_ind.iloc[-1]
         pk_today = last["pattern_key"]
         if pk_today is None or pk_today not in pattern_stats:
-            # no valid pattern for today; skip from index but you could still build a page if you want
+            # no valid pattern for today; skip from index
             continue
 
         pat_today = pattern_stats[pk_today]
         support_today = pat_today["count"]
         p_up_T1_today = pat_today["p_up_T1"]
         dir_T1_today, conf_T1_today = direction_and_confidence(p_up_T1_today)
+
+        if support_today < MIN_SUPPORT_FOR_LISTING:
+            # still keep it, because MIN_SUPPORT_FOR_LISTING=1;
+            # this check is just for future if you increase the threshold
+            pass
 
         row_info = {
             "symbol": sym,
@@ -563,7 +565,8 @@ def main():
         (stocks_dir / f"{sym}.html").write_text(stock_html, encoding="utf-8")
 
     # landing page
-    strong = [r for r in summary_rows if r["support"] >= MIN_SUPPORT_FOR_LISTING]
+    # now we do NOT filter by support – show all available signals
+    strong = summary_rows
 
     up_rows = [r for r in strong if r["dir_T1"] == "Up"]
     down_rows = [r for r in strong if r["dir_T1"] == "Down"]
