@@ -1,54 +1,80 @@
-name: NSE Daily Predictions
+name: Build & Deploy – NSE Pattern Model
 
 on:
+  # Manual trigger from GitHub UI
+  workflow_dispatch:
+
+  # Schedule: Mon–Fri at 10:15 UTC (~15:45 IST, after NSE close)
   schedule:
-    - cron: "10 10 * * 1-5"
-  workflow_dispatch: {}
+    - cron: "15 10 * * 1-5"
+
+permissions:
+  contents: read
+  pages: write        # to publish to Pages
+  id-token: write     # to authenticate to Pages
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pages: write
-      id-token: write
+    timeout-minutes: 60
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy jinja2 scikit-learn yfinance
+          # If you already have requirements.txt, keep this:
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Otherwise, minimally install what we need:
+          pip install pandas numpy
 
-      - name: Sync NSE data
+      # OPTIONAL: if you already have a script that updates
+      # Data/Historical/*.csv and Data/Today/*.csv (yfinance etc.),
+      # keep/enable this step. If not, you can delete this block.
+      - name: Sync NSE data (optional)
         run: |
-          python scripts/sync_nse_data.py
+          if [ -f scripts/sync_nse_data.py ]; then
+            python scripts/sync_nse_data.py
+          else
+            echo "scripts/sync_nse_data.py not found – skipping data sync."
+          fi
 
-      - name: Train logistic model
+      - name: Build pattern table (T+1/T+2/T+3)
         run: |
-          python scripts/train_logit.py
+          python scripts/build_pattern_table.py
 
-      - name: Build prediction pages
+      - name: Build prediction pages from patterns
         run: |
-          python scripts/build_predictions_logit.py
+          python scripts/build_predictions_patterns.py
 
-      # Only upload if dist/ actually exists (i.e. trading day)
-      - name: Upload artifact
-        if: hashFiles('dist/**') != ''
-        id: upload_pages
+      - name: Prepare Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: dist
 
-      # Only deploy if upload step ran successfully
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
       - name: Deploy to GitHub Pages
-        if: steps.upload_pages.outcome == 'success'
-        id: deploy
+        id: deployment
         uses: actions/deploy-pages@v4
