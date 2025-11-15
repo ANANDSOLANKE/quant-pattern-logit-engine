@@ -1,9 +1,14 @@
 # scripts/sync_nse_data.py
 #
-# Incremental NSE data sync with "holiday / non-trading day" shortcut.
-# - Uses Data/Historical/<SYMBOL>.csv as base
-# - Downloads ONLY missing days after the last Date
-# - Before looping all symbols, probes 1 symbol; if no new bar -> assume holiday and exit.
+# Incremental NSE data sync with:
+#   - Weekend + fixed holiday calendar shortcut for 2025
+#   - Probe-symbol shortcut for other unexpected non-trading days
+#
+# Behaviour:
+#   * If today is Saturday/Sunday or one of the configured NSE holidays -> exit fast.
+#   * Else use one probe symbol to check if a new bar exists.
+#   * If probe has no new bar -> treat as holiday and exit.
+#   * Otherwise incrementally update all symbols.
 
 from pathlib import Path
 from datetime import date, timedelta
@@ -23,6 +28,52 @@ START_DATE = date(2000, 1, 1)
 for d in (HIST_DIR, TODAY_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
+# ---------- NSE holiday calendar (2025) ----------
+
+HOLIDAYS_NSE_2025 = {
+    # 1  Mahashivratri
+    date(2025, 2, 26),
+    # 2  Holi
+    date(2025, 3, 14),
+    # 3  Id-Ul-Fitr (Ramadan Eid)
+    date(2025, 3, 31),
+    # 4  Shri Mahavir Jayanti
+    date(2025, 4, 10),
+    # 5  Dr. Baba Saheb Ambedkar Jayanti
+    date(2025, 4, 14),
+    # 6  Good Friday
+    date(2025, 4, 18),
+    # 7  Maharashtra Day
+    date(2025, 5, 1),
+    # 8  Independence Day / Parsi New Year
+    date(2025, 8, 15),
+    # 9  Shri Ganesh Chaturthi
+    date(2025, 8, 27),
+    # 10 Mahatma Gandhi Jayanti / Dussehra
+    date(2025, 10, 2),
+    # 11 Diwali Laxmi Pujan
+    date(2025, 10, 21),
+    # 12 Balipratipada
+    date(2025, 10, 22),
+    # 13 Prakash Gurpurb Sri Guru Nanak Dev
+    date(2025, 11, 5),
+    # 14 Christmas
+    date(2025, 12, 25),
+}
+
+
+def is_nse_holiday(d: date) -> bool:
+    """Return True if 'd' is a configured NSE non-trading day."""
+    # Saturday (5) or Sunday (6)
+    if d.weekday() >= 5:
+        return True
+    # Year-specific exchange holidays
+    if d in HOLIDAYS_NSE_2025:
+        return True
+    return False
+
+
+# ---------- helpers for data handling ----------
 
 def _ensure_date_column(df: pd.DataFrame) -> pd.DataFrame:
     """Make sure the dataframe has a 'Date' column."""
@@ -45,6 +96,7 @@ def _ensure_date_column(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def download_incremental(ticker: str, start: date, today: date) -> pd.DataFrame:
+    """Download OHLCV from yfinance in [start, today] inclusive."""
     return yf.download(
         ticker,
         start=start.isoformat(),
@@ -83,7 +135,7 @@ def download_and_update_symbol(symbol: str, today: date) -> pd.DataFrame:
                 df_new = _ensure_date_column(df_new)
 
                 df_new["Symbol"] = symbol
-                df_new["Sector"] = ""   # optional – fill later with sector mapping
+                df_new["Sector"] = ""   # optional – can be filled later
                 df_new["Index"] = "NSE"
 
                 df_new = df_new[[
@@ -146,7 +198,7 @@ def probe_non_trading_day(symbol: str, today: date) -> bool:
 
     if not hist_path.exists():
         # No history yet: can't detect holiday, let normal loop handle it.
-        print(f"Probe: {symbol} has no local history, skipping holiday check.")
+        print(f"Probe: {symbol} has no local history, skipping probe shortcut.")
         return False
 
     probe_df = pd.read_csv(hist_path, parse_dates=["Date"])
@@ -164,7 +216,7 @@ def probe_non_trading_day(symbol: str, today: date) -> bool:
     df_new = download_incremental(ticker, start, today)
 
     if df_new.empty:
-        print(f"Probe: no new rows for {symbol}. Assuming {today} is a non-trading day (holiday/weekend).")
+        print(f"Probe: no new rows for {symbol}. Assuming {today} is a non-trading day.")
         return True
 
     print(f"Probe: found new rows for {symbol}. Market is open, continuing full update.")
@@ -175,25 +227,30 @@ def main():
     if not SYMBOLS_FILE.exists():
         raise SystemExit(f"Missing {SYMBOLS_FILE}")
 
+    today = date.today()
+
+    # ---------- HARD holiday/weekend shortcut ----------
+    if is_nse_holiday(today):
+        print(f"{today} is configured NSE non-trading day (weekend or exchange holiday).")
+        print("Skipping full NSE update.")
+        return
+
+    # ---------- load symbol universe ----------
     syms = pd.read_csv(SYMBOLS_FILE)["symbol"].dropna().astype(str).unique()
     syms = [s.strip().upper() for s in syms if s.strip()]
     if not syms:
         raise SystemExit("No symbols found in NSE_symbols.csv")
 
-    today = date.today()
-
-    # ---------- HOLIDAY SHORTCUT ----------
-    # Use the first symbol as a probe to detect if today has a new bar.
+    # ---------- Probe shortcut for unexpected non-trading days ----------
     probe_symbol = syms[0]
     try:
         if probe_non_trading_day(probe_symbol, today):
-            print("Holiday/non-trading day detected. Skipping full NSE update.")
+            print("Probe detected non-trading day. Skipping full NSE update.")
             return
     except Exception as e:
-        # If anything goes wrong during probe, log and fall back to normal behaviour
         print(f"Probe failed with error {e!r}, continuing with full update loop.")
 
-    # ---------- NORMAL UPDATE LOOP ----------
+    # ---------- Normal incremental update loop ----------
     all_frames = []
     for s in syms:
         df = download_and_update_symbol(s, today)
