@@ -306,7 +306,7 @@ def render_stock_page(row, feature_names, latest_fv, models, history_rows):
         html.append("<p class='tag'>Backtest is computed from your uploaded historical data; no values are faked.</p>")
         html.append("</div>")
 
-    # Feature snapshot of latest bar
+    # Feature snapshot of latest bar (T+1 drivers)
     beta_T1 = models["T1"]["coef"]
     beta_abs = [abs(b * x) for b, x in zip(beta_T1, latest_fv)]
     driver_rows = sorted(
@@ -330,8 +330,11 @@ def render_stock_page(row, feature_names, latest_fv, models, history_rows):
 # ---------- main ----------
 
 def main():
+    # On weekends/holidays, Historical.csv may not be regenerated.
     if not DATA_FILE.exists():
-        raise SystemExit(f"Missing {DATA_FILE}")
+        print(f"{DATA_FILE} not found – skipping page build (keep previous dist/).")
+        return
+
     feature_names, models = load_model()
 
     DIST_DIR.mkdir(parents=True, exist_ok=True)
