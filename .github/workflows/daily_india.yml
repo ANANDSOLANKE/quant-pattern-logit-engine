@@ -32,17 +32,18 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
+      # ------------------------------------------------------------------
+      # Install from requirements.txt if present, else minimal deps
+      # ------------------------------------------------------------------
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            # minimal set needed by our scripts
             pip install pandas numpy yfinance
           fi
 
       # OPTIONAL: daily NSE update via yfinance
-      # If this script is not needed, you can delete this whole step.
       - name: Sync NSE data (optional)
         continue-on-error: true
         run: |
@@ -60,6 +61,19 @@ jobs:
       - name: Build prediction pages from patterns
         run: |
           python scripts/build_predictions_patterns.py
+
+      # ------------------------------------------------------------------
+      # NEW: make sure pattern_table.csv is inside the published site
+      # ------------------------------------------------------------------
+      - name: Copy pattern table into dist/Data/NSE
+        run: |
+          mkdir -p dist/Data/NSE
+          if [ -f Data/NSE/pattern_table.csv ]; then
+            cp Data/NSE/pattern_table.csv dist/Data/NSE/pattern_table.csv
+            echo "Copied Data/NSE/pattern_table.csv -> dist/Data/NSE/"
+          else
+            echo "WARNING: Data/NSE/pattern_table.csv not found !" >&2
+          fi
 
       - name: Prepare Pages artifact
         uses: actions/upload-pages-artifact@v3
