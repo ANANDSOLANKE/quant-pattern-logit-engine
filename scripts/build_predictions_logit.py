@@ -1,8 +1,14 @@
 # scripts/build_predictions_logit.py
 #
 # Use multi-horizon logistic model (T+1, T+2, T+3) to build:
-#   - index.html with probabilities
-#   - stocks/<SYMBOL>.html with details and last-10-bar backtest
+#   - dist/index.html with TWO tables:
+#       * top by T+1 Up%
+#       * top by T+1 Down%
+#   - dist/stocks/<SYMBOL>.html for each stock:
+#       * OHLC
+#       * T+1 / T+2 / T+3 probabilities (Up% / Down%)
+#       * last 10 bars backtest for all three horizons
+#       * small T+1 summary: Up-side wins, Down-side wins, win%
 
 from pathlib import Path
 import json
@@ -15,6 +21,8 @@ DATA_FILE = Path("Data") / "Historical.csv"
 MODEL_PATH = Path("Model") / "logit_model_T123.json"
 DIST_DIR = Path("dist")
 
+
+# ---------------- common feature engineering (same as in train) ----------------
 
 def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values("Date").reset_index(drop=True)
@@ -34,8 +42,10 @@ def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
     vol = df["Volume"].astype(float)
     open_ = df["Open"].astype(float)
 
+    # Returns
     ret1 = close.pct_change()
 
+    # RSI14
     delta = close.diff()
     gain = delta.clip(lower=0.0)
     loss = -delta.clip(upper=0.0)
@@ -44,13 +54,16 @@ def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
     rs = roll_up / (roll_down + 1e-9)
     rsi14 = 100 - (100 / (1 + rs))
 
+    # ROC 5 / 10
     roc5 = close.pct_change(5)
     roc10 = close.pct_change(10)
 
+    # Volume z-score
     vol_mean = vol.rolling(20, min_periods=20).mean()
     vol_std = vol.rolling(20, min_periods=20).std()
     vol_z = (vol - vol_mean) / (vol_std + 1e-9)
 
+    # ATR% (14)
     tr1 = (high - low).abs()
     tr2 = (high - close.shift(1)).abs()
     tr3 = (low - close.shift(1)).abs()
@@ -58,23 +71,28 @@ def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
     atr14 = tr.rolling(14, min_periods=14).mean()
     atr_pct = atr14 / (close + 1e-9)
 
+    # Momentum 10
     mom10 = close.pct_change(10)
 
+    # CCI20
     tp = (high + low + close) / 3.0
     sma_tp = tp.rolling(20, min_periods=20).mean()
     mad_tp = (tp - sma_tp).abs().rolling(20, min_periods=20).mean()
     cci20 = (tp - sma_tp) / (0.015 * (mad_tp + 1e-9))
 
+    # Stochastic %K (14)
     low14 = low.rolling(14, min_periods=14).min()
     high14 = high.rolling(14, min_periods=14).max()
     stoch_k = 100 * (close - low14) / (high14 - low14 + 1e-9)
 
+    # MACD (12,26,9)
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     macd = ema12 - ema26
     macd_signal = macd.ewm(span=9, adjust=False).mean()
     macd_hist = macd - macd_signal
 
+    # MFI 14
     mf_tp = tp * vol
     mf_pos = mf_tp.where(tp > tp.shift(1), 0.0)
     mf_neg = mf_tp.where(tp < tp.shift(1), 0.0)
@@ -83,12 +101,14 @@ def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
     mfr = mf_pos_sum / (mf_neg_sum + 1e-9)
     mfi14 = 100 - (100 / (1 + mfr))
 
+    # Chaikin Money Flow 20
     mfm = ((close - low) - (high - close)) / (high - low + 1e-9)
     mfv = mfm * vol
     cmf20 = mfv.rolling(20, min_periods=20).sum() / (
         vol.rolling(20, min_periods=20).sum() + 1e-9
     )
 
+    # OBV & ADL
     direction = np.sign(close - close.shift(1))
     obv = (direction * vol).fillna(0.0).cumsum()
     adl = mfv.fillna(0.0).cumsum()
@@ -99,6 +119,7 @@ def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
     adl_std = adl.rolling(20, min_periods=20).std()
     adl_z = (adl - adl_mean) / (adl_std + 1e-9)
 
+    # Candle geometry
     body = (close - open_).abs()
     candle_range = (high - low).replace(0, np.nan)
     body_pct = body / (candle_range + 1e-9)
@@ -163,52 +184,89 @@ def load_model():
     return feature_names, feature_stats, models
 
 
-def render_index(rows):
+# ---------------- HTML render helpers ----------------
+
+COMMON_STYLE = """
+body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#050816;color:#e5e5e5;margin:0;padding:24px;}
+h1,h2{margin-top:0;}
+.card{background:#0b1020;border-radius:16px;padding:16px;margin-bottom:16px;border:1px solid #1f2937;}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;}
+th,td{border:1px solid #272b3b;padding:6px;text-align:center;}
+th{background:#111827;}
+a{color:#7ee7ff;text-decoration:none;}
+a:hover{text-decoration:underline;}
+.tag{font-size:11px;color:#9ca3af;}
+.conf-high{color:#22c55e;font-weight:600;}
+.conf-mid{color:#eab308;font-weight:600;}
+.conf-low{color:#f97316;font-weight:600;}
+"""
+
+
+def render_index(up_rows, down_rows):
     html = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'>",
         "<title>NSE – Multi-horizon Probabilities</title>",
         "<meta name='viewport' content='width=device-width, initial-scale=1.0'>",
         "<style>",
-        "body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#050816;color:#e5e5e5;margin:0;padding:24px;}",
-        "h1{margin-top:0;margin-bottom:12px;}",
-        "table{width:100%;border-collapse:collapse;font-size:13px;}",
-        "th,td{border:1px solid #272b3b;padding:6px;text-align:center;}",
-        "th{background:#111827;}",
-        "a{color:#7ee7ff;text-decoration:none;}",
-        "a:hover{text-decoration:underline;}",
-        ".conf-high{color:#22c55e;font-weight:600;}",
-        ".conf-mid{color:#eab308;font-weight:600;}",
-        ".conf-low{color:#f97316;font-weight:600;}",
+        COMMON_STYLE,
         "</style></head><body>",
-        "<h1>NSE – Next-day and 2/3-day Probabilities</h1>",
-        "<p>Probabilities are estimated from historical OHLCV using logistic models (T+1, T+2, T+3). They are not guarantees.</p>",
+        "<h1>NSE – Next-day probabilities</h1>",
+        "<p class='tag'>Tables below are sorted by T+1 Up% (first) and T+1 Down% (second). "
+        "Probabilities are statistical estimates from 20+ years of OHLCV patterns.</p>",
+        "<div class='card'>",
+        "<h2>Highest T+1 Up probability</h2>",
         "<table>",
-        "<tr><th>Symbol</th><th>Last Date</th><th>Close</th>",
-        "<th>T+1 Up%</th><th>T+2 Up%</th><th>T+3 Up%</th></tr>",
+        "<tr><th>Symbol</th><th>Last Date</th><th>Close</th><th>T+1 Up%</th><th>T+1 Down%</th></tr>",
     ]
-    for r in rows:
-        def cls(p):
-            if p >= 0.6:
-                return "conf-high"
-            elif p <= 0.4:
-                return "conf-low"
-            return "conf-mid"
 
+    def cls(p):
+        if p >= 0.6:
+            return "conf-high"
+        elif p <= 0.4:
+            return "conf-low"
+        return "conf-mid"
+
+    for r in up_rows:
         html.append(
             "<tr>"
             f"<td><a href='stocks/{r['symbol']}.html'>{r['symbol']}</a></td>"
             f"<td>{r['date']}</td>"
             f"<td>{r['close']:.2f}</td>"
             f"<td class='{cls(r['p_T1'])}'>{r['p_T1']*100:0.1f}</td>"
-            f"<td class='{cls(r['p_T2'])}'>{r['p_T2']*100:0.1f}</td>"
-            f"<td class='{cls(r['p_T3'])}'>{r['p_T3']*100:0.1f}</td>"
+            f"<td>{(1-r['p_T1'])*100:0.1f}</td>"
             "</tr>"
         )
-    html.extend(["</table></body></html>"])
+
+    html.extend([
+        "</table>",
+        "</div>",
+        "<div class='card'>",
+        "<h2>Highest T+1 Down probability</h2>",
+        "<table>",
+        "<tr><th>Symbol</th><th>Last Date</th><th>Close</th><th>T+1 Down%</th><th>T+1 Up%</th></tr>",
+    ])
+
+    for r in down_rows:
+        down_p = 1 - r["p_T1"]
+        html.append(
+            "<tr>"
+            f"<td><a href='stocks/{r['symbol']}.html'>{r['symbol']}</a></td>"
+            f"<td>{r['date']}</td>"
+            f"<td>{r['close']:.2f}</td>"
+            f"<td class='{cls(1-down_p)}'>{down_p*100:0.1f}</td>"
+            f"<td>{r['p_T1']*100:0.1f}</td>"
+            "</tr>"
+        )
+
+    html.extend([
+        "</table>",
+        "</div>",
+        "</body></html>",
+    ])
     return "\n".join(html)
 
 
-def render_stock_page(row, feature_names, latest_fv_std, models, history_rows):
+def render_stock_page(row, feature_names, latest_fv_std, models, history_rows, t1_summary):
     def cls(p):
         if p >= 0.6:
             return "conf-high"
@@ -221,18 +279,7 @@ def render_stock_page(row, feature_names, latest_fv_std, models, history_rows):
         f"<title>{row['symbol']} – Multi-horizon probability</title>",
         "<meta name='viewport' content='width=device-width, initial-scale=1.0'>",
         "<style>",
-        "body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#050816;color:#e5e5e5;margin:0;padding:24px;}",
-        "h1,h2{margin-top:0;}",
-        ".card{background:#0b1020;border-radius:16px;padding:16px;margin-bottom:16px;border:1px solid #1f2937;}",
-        "table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;}",
-        "th,td{border:1px solid #272b3b;padding:6px;text-align:center;}",
-        "th{background:#111827;}",
-        "a{color:#7ee7ff;text-decoration:none;}",
-        "a:hover{text-decoration:underline;}",
-        ".tag{font-size:11px;color:#9ca3af;}",
-        ".conf-high{color:#22c55e;font-weight:600;}",
-        ".conf-mid{color:#eab308;font-weight:600;}",
-        ".conf-low{color:#f97316;font-weight:600;}",
+        COMMON_STYLE,
         "</style></head><body>",
         "<a href='../index.html'>&larr; Back to all stocks</a>",
         "<div class='card'>",
@@ -250,10 +297,26 @@ def render_stock_page(row, feature_names, latest_fv_std, models, history_rows):
         f"<tr><td>T+3</td><td class='{cls(row['p_T3'])}'>{row['p_T3']*100:0.2f}</td>"
         f"<td>{(1-row['p_T3'])*100:0.2f}</td></tr>",
         "</table>",
-        "<p class='tag'>These are statistical probabilities based on past patterns, not certainties.</p>",
+        "<p class='tag'>These are statistical probabilities from historical patterns, not certainties.</p>",
         "</div>",
     ]
 
+    # --- T+1 summary block ---
+    html.append("<div class='card'><h2>T+1 – last 10 bars summary</h2>")
+    html.append("<table><tr><th>Side</th><th>Signals</th><th>Wins</th><th>Win %</th></tr>")
+    for side in ["Up", "Down"]:
+        s = t1_summary[side]
+        win_pct = (s["wins"] / s["signals"] * 100.0) if s["signals"] > 0 else 0.0
+        html.append(
+            f"<tr><td>{side}</td><td>{s['signals']}</td>"
+            f"<td>{s['wins']}</td><td>{win_pct:0.1f}</td></tr>"
+        )
+    html.append("</table>")
+    html.append("<p class='tag'>Side = how the model called T+1 (Up if P&gt;=50%, Down if P&lt;50%). "
+                "Win = prediction direction matched actual move.</p>")
+    html.append("</div>")
+
+    # --- detailed last-10-bar table ---
     if history_rows:
         html.append("<div class='card'><h2>Last 10 bars – prediction vs actual</h2>")
         html.append("<table><tr><th>Date</th><th>Close</th>"
@@ -274,9 +337,10 @@ def render_stock_page(row, feature_names, latest_fv_std, models, history_rows):
                 "</tr>"
             )
         html.append("</table>")
-        html.append("<p class='tag'>Backtest is computed from your historical data; no values are faked.</p>")
+        html.append("<p class='tag'>Backtest uses your real last-10 bars – nothing is simulated.</p>")
         html.append("</div>")
 
+    # --- drivers for today (T+1) ---
     beta_T1 = models["T1"]["coef"]
     beta_abs = [abs(b * x) for b, x in zip(beta_T1, latest_fv_std)]
     driver_rows = sorted(
@@ -285,15 +349,17 @@ def render_stock_page(row, feature_names, latest_fv_std, models, history_rows):
         reverse=True,
     )[:7]
 
-    html.append("<div class='card'><h2>Top drivers for T+1 today</h2>")
+    html.append("<div class='card'><h2>Top drivers for today's T+1 probability</h2>")
     html.append("<table><tr><th>Feature</th><th>β</th><th>|β·x|</th></tr>")
     for name, b, mag in driver_rows:
         html.append(f"<tr><td>{name}</td><td>{b:0.4f}</td><td>{mag:0.4f}</td></tr>")
-    html.append("</table><p class='tag'>Higher |β·x| means stronger influence on T+1 probability.</p></div>")
+    html.append("</table><p class='tag'>Higher |β·x| means stronger influence on today's T+1 probability.</p></div>")
 
     html.append("</body></html>")
     return "\n".join(html)
 
+
+# ---------------- main build ----------------
 
 def main():
     if not DATA_FILE.exists():
@@ -320,6 +386,7 @@ def main():
         if block.empty:
             continue
 
+        # Raw features and standardisation
         fv_raw = block[feature_names].values.astype(float)
         fv_std = fv_raw.copy()
         for j, name in enumerate(feature_names):
@@ -344,6 +411,7 @@ def main():
         block["p_T2"] = probs_T2
         block["p_T3"] = probs_T3
 
+        # Actual future moves
         close_series = block["Close"]
         act_T1 = (close_series.shift(-1) > close_series).map({True: "Up", False: "Down"})
         act_T2 = (close_series.shift(-2) > close_series).map({True: "Up", False: "Down"})
@@ -352,6 +420,7 @@ def main():
         block["act_T2"] = act_T2
         block["act_T3"] = act_T3
 
+        # Last row
         last = block.iloc[-1]
         row_info = {
             "symbol": sym,
@@ -367,6 +436,7 @@ def main():
         }
         summary_rows.append(row_info)
 
+        # Last 10 bars history
         hist = block.dropna(subset=["act_T1", "act_T2", "act_T3"]).tail(10)
         history_rows = [
             {
@@ -382,12 +452,30 @@ def main():
             for _, r in hist.iterrows()
         ]
 
+        # T+1 summary for last 10 rows
+        t1_summary = {
+            "Up": {"signals": 0, "wins": 0},
+            "Down": {"signals": 0, "wins": 0},
+        }
+        for r in history_rows:
+            pred_side = "Up" if r["p_T1"] >= 0.5 else "Down"
+            actual_side = r["act_T1"]
+            t1_summary[pred_side]["signals"] += 1
+            if actual_side == pred_side:
+                t1_summary[pred_side]["wins"] += 1
+
         latest_fv_std = fv_std[-1]
-        stock_html = render_stock_page(row_info, feature_names, latest_fv_std, models, history_rows)
+        stock_html = render_stock_page(row_info, feature_names, latest_fv_std,
+                                       models, history_rows, t1_summary)
         (stocks_dir / f"{sym}.html").write_text(stock_html, encoding="utf-8")
 
+    # Landing page tables
+    # Top by Up% and by Down% (T+1)
     summary_rows.sort(key=lambda r: r["p_T1"], reverse=True)
-    index_html = render_index(summary_rows)
+    up_rows = summary_rows[:200]          # adjust how many you want on page
+    down_rows = sorted(summary_rows, key=lambda r: r["p_T1"])[:200]
+
+    index_html = render_index(up_rows, down_rows)
     (DIST_DIR / "index.html").write_text(index_html, encoding="utf-8")
     print(f"Wrote {len(summary_rows)} stock pages and index.html under {DIST_DIR}/")
 
