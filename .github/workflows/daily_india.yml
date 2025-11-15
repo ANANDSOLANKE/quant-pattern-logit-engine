@@ -10,8 +10,8 @@ on:
 
 permissions:
   contents: read
-  pages: write        # to publish to Pages
-  id-token: write     # to authenticate to Pages
+  pages: write
+  id-token: write
 
 concurrency:
   group: "pages"
@@ -34,17 +34,20 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # If you already have requirements.txt, keep this:
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # Otherwise, minimally install what we need:
-          pip install pandas numpy
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            # minimal set needed by our scripts
+            pip install pandas numpy yfinance
+          fi
 
-      # OPTIONAL: if you already have a script that updates
-      # Data/Historical/*.csv and Data/Today/*.csv (yfinance etc.),
-      # keep/enable this step. If not, you can delete this block.
+      # OPTIONAL: daily NSE update via yfinance
+      # If this script is not needed, you can delete this whole step.
       - name: Sync NSE data (optional)
+        continue-on-error: true
         run: |
           if [ -f scripts/sync_nse_data.py ]; then
+            echo "Running scripts/sync_nse_data.py ..."
             python scripts/sync_nse_data.py
           else
             echo "scripts/sync_nse_data.py not found – skipping data sync."
