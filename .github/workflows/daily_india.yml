@@ -6,7 +6,7 @@ on:
 
   # Schedule: Mon–Fri at 10:15 UTC (~15:45 IST, after NSE close)
   schedule:
-    - cron: "15 10 * * 1-5"
+    - cron: '15 10 * * 1-5'
 
 permissions:
   contents: read
@@ -14,7 +14,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "pages"
+  group: pages
   cancel-in-progress: false
 
 jobs:
@@ -29,7 +29,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.12'
 
       - name: Install dependencies
         run: |
@@ -58,20 +58,16 @@ jobs:
         run: |
           python scripts/build_predictions_patterns.py
 
-      # ------------------------------------------------------------------
-      # Find pattern_table.csv wherever the script wrote it,
-      # then ensure it ends up in the published site at dist/Data/NSE/.
-      # If not found, create a small dummy file so the URL is never 404.
-      # ------------------------------------------------------------------
+      # Ensure pattern_table.csv is published under dist/Data/NSE/
       - name: Locate and copy pattern_table.csv into dist/Data/NSE
         run: |
           echo "Searching for pattern_table.csv..."
-          FOUND=$(find . -maxdepth 6 -type f -name "pattern_table.csv" | head -n 1 || true)
+          FOUND=$(find . -maxdepth 6 -type f -name 'pattern_table.csv' | head -n 1 || true)
           mkdir -p dist/Data/NSE
 
           if [ -z "$FOUND" ]; then
             echo "WARNING: pattern_table.csv not found. Creating dummy file in dist/Data/NSE."
-            cat > dist/Data/NSE/pattern_table.csv <<EOF
+            cat > dist/Data/NSE/pattern_table.csv << 'EOF'
 Symbol,LastDate,Close,PUpT1,Confidence,Support,Direction
 DUMMY,2000-01-01,0,0,0,0,UP
 EOF
