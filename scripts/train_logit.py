@@ -2,11 +2,9 @@
 #
 # 1) If Data/Historical.csv does not exist:
 #       build it by concatenating all Data/Historical/*.csv
-# 2) Compute indicators and train three logistic models:
-#       T1: next-day (T+1) direction vs today's close
-#       T2: 2-day ahead (T+2)
-#       T3: 3-day ahead (T+3)
-# 3) Save to Model/logit_model_T123.json
+# 2) Compute indicators + standardise features
+# 3) Train three logistic models (T+1, T+2, T+3)
+# 4) Save model + feature scaling params to Model/logit_model_T123.json
 
 from pathlib import Path
 import json
@@ -44,22 +42,14 @@ def build_master_from_per_symbol():
             print(f"Skipping {f.name} due to read error: {e!r}")
             continue
 
-        # Make sure Symbol column exists
         if "Symbol" not in df.columns:
-            # assume ticker stem if symbol missing
             df["Symbol"] = f.stem
 
-        # normalise columns
-        expected = ["Symbol", "Date", "Open", "High", "Low", "Close", "Volume"]
-        for col in expected:
-            if col not in df.columns:
-                print(f"{f.name}: missing {col}, skipping file.")
-                df = None
-                break
-        if df is None:
+        needed = ["Symbol", "Date", "Open", "High", "Low", "Close", "Volume"]
+        if any(col not in df.columns for col in needed):
+            print(f"{f.name}: missing one of {needed}, skipping.")
             continue
 
-        # Optional columns
         if "Sector" not in df.columns:
             df["Sector"] = ""
         if "Index" not in df.columns:
@@ -81,15 +71,10 @@ def build_master_from_per_symbol():
 # ---------- feature engineering for one symbol ----------
 
 def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Given raw OHLCV for ONE symbol, compute indicators + T+1/T+2/T+3 targets.
-    """
     df = df.sort_values("Date").reset_index(drop=True)
-
-    if len(df) < 60:  # need some history for indicators
+    if len(df) < 60:
         return pd.DataFrame()
 
-    # ensure numeric
     for col in ["Open", "High", "Low", "Close", "Volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -103,7 +88,7 @@ def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
     vol = df["Volume"].astype(float)
     open_ = df["Open"].astype(float)
 
-    # basic returns
+    # Returns
     ret1 = close.pct_change()
 
     # RSI14
@@ -119,7 +104,7 @@ def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
     roc5 = close.pct_change(5)
     roc10 = close.pct_change(10)
 
-    # volume z-score over 20 days
+    # Volume z-score
     vol_mean = vol.rolling(20, min_periods=20).mean()
     vol_std = vol.rolling(20, min_periods=20).std()
     vol_z = (vol - vol_mean) / (vol_std + 1e-9)
@@ -132,7 +117,7 @@ def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
     atr14 = tr.rolling(14, min_periods=14).mean()
     atr_pct = atr14 / (close + 1e-9)
 
-    # Momentum 10 (percentage)
+    # Momentum 10
     mom10 = close.pct_change(10)
 
     # CCI20
@@ -146,7 +131,7 @@ def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
     high14 = high.rolling(14, min_periods=14).max()
     stoch_k = 100 * (close - low14) / (high14 - low14 + 1e-9)
 
-    # MACD (12,26,9) on close
+    # MACD (12,26,9)
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     macd = ema12 - ema26
@@ -169,7 +154,7 @@ def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
         vol.rolling(20, min_periods=20).sum() + 1e-9
     )
 
-    # OBV and Accumulation/Distribution Line
+    # OBV & ADL
     direction = np.sign(close - close.shift(1))
     obv = (direction * vol).fillna(0.0).cumsum()
     adl = mfv.fillna(0.0).cumsum()
@@ -187,7 +172,7 @@ def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
     up_shadow_pct = (high - close.clip(upper=open_)) / (candle_range + 1e-9)
     down_shadow_pct = (open_.clip(upper=close) - low) / (candle_range + 1e-9)
 
-    # Targets: T+1, T+2, T+3 vs today's close
+    # Targets
     next1 = close.shift(-1)
     next2 = close.shift(-2)
     next3 = close.shift(-3)
@@ -237,22 +222,22 @@ def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
             "y_T1", "y_T2", "y_T3",
         ]
     )
-
     return feat
 
 
-# ---------- main training ----------
+# ---------- training helpers ----------
 
 def train_for_label(feats: pd.DataFrame, feature_cols, label: str):
     df = feats.dropna(subset=feature_cols + [label])
     X = df[feature_cols].values.astype(float)
     y = df[label].astype(int).values
-    if len(y) < 1000:
+    if len(y) < 2000:
         raise SystemExit(f"Not enough samples for {label}: {len(y)}")
     print(f"Training {label}: samples={len(y)}, positive_ratio={y.mean():.3f}")
     clf = LogisticRegression(
-        max_iter=1000,
-        class_weight="balanced",
+        max_iter=300,
+        C=5.0,             # less regularisation → stronger signals
+        class_weight=None, # no forced balancing
         solver="lbfgs",
         n_jobs=1,
     )
@@ -264,12 +249,11 @@ def train_for_label(feats: pd.DataFrame, feature_cols, label: str):
 
 
 def main():
-    # 1) Ensure we have a master file
+    # Build master if needed
     if not DATA_FILE.exists():
         print("Data/Historical.csv not found – building from Data/Historical/*.csv …")
         build_master_from_per_symbol()
 
-    # 2) Load master and train
     print(f"Reading {DATA_FILE} ...")
     raw = pd.read_csv(DATA_FILE, parse_dates=["Date"], low_memory=False)
 
@@ -299,6 +283,16 @@ def main():
         "BODY_PCT", "UP_SHADOW_PCT", "DOWN_SHADOW_PCT",
     ]
 
+    # --- standardise features globally and record mean/std ---
+    feature_stats = {}
+    for col in feature_cols:
+        m = float(feats[col].mean())
+        s = float(feats[col].std())
+        if s == 0.0:
+            s = 1.0
+        feature_stats[col] = {"mean": m, "std": s}
+        feats[col] = (feats[col] - m) / s
+
     models = {
         "T1": train_for_label(feats, feature_cols, "y_T1"),
         "T2": train_for_label(feats, feature_cols, "y_T2"),
@@ -307,6 +301,7 @@ def main():
 
     model_dict = {
         "feature_names": feature_cols,
+        "feature_stats": feature_stats,
         "models": models,
     }
 
