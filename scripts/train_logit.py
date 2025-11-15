@@ -217,8 +217,10 @@ def train_for_label(feats: pd.DataFrame, feature_cols, label: str):
 
 
 def main():
+    # Holiday / weekend: master file may not be produced by sync step.
     if not DATA_FILE.exists():
-        raise SystemExit(f"Missing {DATA_FILE}")
+        print(f"{DATA_FILE} not found – skipping training (using previous model).")
+        return
 
     print(f"Reading {DATA_FILE} ...")
     raw = pd.read_csv(DATA_FILE, parse_dates=["Date"], low_memory=False)
