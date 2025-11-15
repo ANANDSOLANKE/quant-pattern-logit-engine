@@ -32,9 +32,6 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-      # ------------------------------------------------------------------
-      # Install from requirements.txt if present, else minimal deps
-      # ------------------------------------------------------------------
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
@@ -43,7 +40,6 @@ jobs:
             pip install pandas numpy yfinance
           fi
 
-      # OPTIONAL: daily NSE update via yfinance
       - name: Sync NSE data (optional)
         continue-on-error: true
         run: |
@@ -63,17 +59,29 @@ jobs:
           python scripts/build_predictions_patterns.py
 
       # ------------------------------------------------------------------
-      # NEW: make sure pattern_table.csv is inside the published site
+      # Find pattern_table.csv wherever the script wrote it,
+      # then ensure it ends up in the published site at dist/Data/NSE/.
+      # If not found, create a small dummy file so the URL is never 404.
       # ------------------------------------------------------------------
-      - name: Copy pattern table into dist/Data/NSE
+      - name: Locate and copy pattern_table.csv into dist/Data/NSE
         run: |
+          echo "Searching for pattern_table.csv..."
+          FOUND=$(find . -maxdepth 6 -type f -name "pattern_table.csv" | head -n 1 || true)
           mkdir -p dist/Data/NSE
-          if [ -f Data/NSE/pattern_table.csv ]; then
-            cp Data/NSE/pattern_table.csv dist/Data/NSE/pattern_table.csv
-            echo "Copied Data/NSE/pattern_table.csv -> dist/Data/NSE/"
+
+          if [ -z "$FOUND" ]; then
+            echo "WARNING: pattern_table.csv not found. Creating dummy file in dist/Data/NSE."
+            cat > dist/Data/NSE/pattern_table.csv <<EOF
+Symbol,LastDate,Close,PUpT1,Confidence,Support,Direction
+DUMMY,2000-01-01,0,0,0,0,UP
+EOF
           else
-            echo "WARNING: Data/NSE/pattern_table.csv not found !" >&2
+            echo "Found pattern_table.csv at: $FOUND"
+            cp "$FOUND" dist/Data/NSE/pattern_table.csv
           fi
+
+          echo "Listing dist/ for verification:"
+          ls -R dist
 
       - name: Prepare Pages artifact
         uses: actions/upload-pages-artifact@v3
