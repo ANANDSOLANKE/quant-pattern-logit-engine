@@ -7,6 +7,7 @@
 # Builds:
 #   - dist/stocks/<SYMBOL>.html   (per-stock multi-horizon page)
 #   - dist/index.html             (landing page with strongest T+1 Up / Down)
+#   - dist/Data/NSE/pattern_table.csv (today's T+1 signals table)
 #
 # Each stock page also shows last 10 daily signals, with actual vs predicted.
 
@@ -136,8 +137,6 @@ def compute_basic_indicators(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     close = df["Close"].astype(float)
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
     vol = df["Volume"].astype(float)
 
     # RET1
@@ -446,8 +445,11 @@ def main():
         n = len(g_ind)
         pattern_keys = [None] * n
 
-        # pattern for each eligible index
-        for i in range(3, n - 3):
+        # IMPORTANT CHANGE:
+        # compute pattern_key for ALL indices where t-1 exists (3..n-1),
+        # so the LAST day (today) has a pattern even though future T+1/T+2/T+3
+        # are unknown in the backtest.
+        for i in range(3, n):
             r_prev = ret1.iloc[i - 1]
             r_today = ret1.iloc[i]
             rsi_today = rsi14.iloc[i]
@@ -466,7 +468,7 @@ def main():
 
         g_ind["pattern_key"] = pattern_keys
 
-        # actual future moves vs today's close
+        # actual future moves vs today's close (only where future exists)
         act_T1 = []
         act_T2 = []
         act_T3 = []
@@ -565,7 +567,6 @@ def main():
         (stocks_dir / f"{sym}.html").write_text(stock_html, encoding="utf-8")
 
     # landing page
-    # now we do NOT filter by support – show all available signals
     strong = summary_rows
 
     up_rows = [r for r in strong if r["dir_T1"] == "Up"]
@@ -582,6 +583,28 @@ def main():
     (DIST_DIR / "index.html").write_text(index_html, encoding="utf-8")
 
     print(f"Wrote {len(summary_rows)} stock pages and index.html under {DIST_DIR}/")
+
+    # ---------- NEW: export T+1 table as CSV ----------
+    if summary_rows:
+        rows_for_csv = []
+        for r in summary_rows:
+            rows_for_csv.append({
+                "Symbol": r["symbol"],
+                "LastDate": r["date"],
+                "Close": r["close"],
+                "PUpT1": r["p_up_T1"],
+                "Confidence": r["conf_T1"],
+                "Support": r["support"],
+                "Direction": r["dir_T1"],
+            })
+        df_csv = pd.DataFrame(rows_for_csv)
+        data_dir = DIST_DIR / "Data" / "NSE"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = data_dir / "pattern_table.csv"
+        df_csv.to_csv(csv_path, index=False)
+        print(f"Wrote pattern_table.csv with {len(df_csv)} rows to {csv_path}")
+    else:
+        print("No summary_rows – pattern_table.csv not written.")
 
 
 if __name__ == "__main__":
