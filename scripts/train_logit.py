@@ -1,21 +1,12 @@
 # scripts/train_logit.py
 #
-# Train three logistic regression models:
-#   T1: next-day (T+1) direction vs today's close
-#   T2: 2-day ahead (T+2) direction vs today's close
-#   T3: 3-day ahead (T+3) direction vs today's close
-#
-# Targets:
-#   y_T1 = 1 if Close[t+1] > Close[t] else 0
-#   y_T2 = 1 if Close[t+2] > Close[t] else 0
-#   y_T3 = 1 if Close[t+3] > Close[t] else 0
-#
-# Features (per bar):
-#   RSI14, ROC5, ROC10, VOL_Z, ATR_PCT, RET1,
-#   MOM10, CCI20, STOCH_K,
-#   MACD, MACD_SIGNAL, MACD_HIST,
-#   MFI14, CMF20, OBV_Z, ADL_Z,
-#   BODY_PCT, UP_SHADOW_PCT, DOWN_SHADOW_PCT
+# 1) If Data/Historical.csv does not exist:
+#       build it by concatenating all Data/Historical/*.csv
+# 2) Compute indicators and train three logistic models:
+#       T1: next-day (T+1) direction vs today's close
+#       T2: 2-day ahead (T+2)
+#       T3: 3-day ahead (T+3)
+# 3) Save to Model/logit_model_T123.json
 
 from pathlib import Path
 import json
@@ -24,19 +15,74 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
-DATA_FILE = Path("Data") / "Historical.csv"
+DATA_DIR = Path("Data")
+HIST_DIR = DATA_DIR / "Historical"
+DATA_FILE = DATA_DIR / "Historical.csv"
+
 MODEL_DIR = Path("Model")
 MODEL_PATH = MODEL_DIR / "logit_model_T123.json"
 
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# ---------- build master file from per-symbol CSVs ----------
+
+def build_master_from_per_symbol():
+    """Create Data/Historical.csv by concatenating Data/Historical/*.csv."""
+    if not HIST_DIR.exists():
+        raise SystemExit(f"Historical folder {HIST_DIR} does not exist.")
+
+    files = sorted(HIST_DIR.glob("*.csv"))
+    if not files:
+        raise SystemExit(f"No CSV files found in {HIST_DIR}.")
+
+    frames = []
+    for f in files:
+        try:
+            df = pd.read_csv(f, parse_dates=["Date"], low_memory=False)
+        except Exception as e:
+            print(f"Skipping {f.name} due to read error: {e!r}")
+            continue
+
+        # Make sure Symbol column exists
+        if "Symbol" not in df.columns:
+            # assume ticker stem if symbol missing
+            df["Symbol"] = f.stem
+
+        # normalise columns
+        expected = ["Symbol", "Date", "Open", "High", "Low", "Close", "Volume"]
+        for col in expected:
+            if col not in df.columns:
+                print(f"{f.name}: missing {col}, skipping file.")
+                df = None
+                break
+        if df is None:
+            continue
+
+        # Optional columns
+        if "Sector" not in df.columns:
+            df["Sector"] = ""
+        if "Index" not in df.columns:
+            df["Index"] = "NSE"
+
+        df = df[["Symbol", "Date", "Open", "High", "Low", "Close",
+                 "Volume", "Sector", "Index"]]
+        frames.append(df)
+
+    if not frames:
+        raise SystemExit("No valid symbol CSVs to build master file.")
+
+    master = pd.concat(frames, ignore_index=True)
+    master = master.sort_values(["Symbol", "Date"])
+    master.to_csv(DATA_FILE, index=False)
+    print(f"Built master file {DATA_FILE} with {len(master)} rows.")
+
+
 # ---------- feature engineering for one symbol ----------
 
 def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Given raw OHLCV for ONE symbol (Symbol, Date, Open, High, Low, Close, Volume, ...),
-    compute indicators + targets y_T1, y_T2, y_T3.
+    Given raw OHLCV for ONE symbol, compute indicators + T+1/T+2/T+3 targets.
     """
     df = df.sort_values("Date").reset_index(drop=True)
 
@@ -117,9 +163,11 @@ def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
     mfi14 = 100 - (100 / (1 + mfr))
 
     # Chaikin Money Flow 20
-    mfm = ((close - low) - (high - close)) / (high - low + 1e-9)  # Money flow multiplier
-    mfv = mfm * vol                                              # Money flow volume
-    cmf20 = mfv.rolling(20, min_periods=20).sum() / (vol.rolling(20, min_periods=20).sum() + 1e-9)
+    mfm = ((close - low) - (high - close)) / (high - low + 1e-9)
+    mfv = mfm * vol
+    cmf20 = mfv.rolling(20, min_periods=20).sum() / (
+        vol.rolling(20, min_periods=20).sum() + 1e-9
+    )
 
     # OBV and Accumulation/Distribution Line
     direction = np.sign(close - close.shift(1))
@@ -179,7 +227,6 @@ def compute_features_block(df: pd.DataFrame) -> pd.DataFrame:
         "y_T3": y_T3,
     })
 
-    # drop rows where we miss any key features or targets
     feat = feat.dropna(
         subset=[
             "RSI14", "ROC5", "ROC10", "VOL_Z", "ATR_PCT", "RET1",
@@ -217,15 +264,15 @@ def train_for_label(feats: pd.DataFrame, feature_cols, label: str):
 
 
 def main():
-    # Holiday / weekend: master file may not be produced by sync step.
+    # 1) Ensure we have a master file
     if not DATA_FILE.exists():
-        print(f"{DATA_FILE} not found – skipping training (using previous model).")
-        return
+        print("Data/Historical.csv not found – building from Data/Historical/*.csv …")
+        build_master_from_per_symbol()
 
+    # 2) Load master and train
     print(f"Reading {DATA_FILE} ...")
     raw = pd.read_csv(DATA_FILE, parse_dates=["Date"], low_memory=False)
 
-    # clean numeric globally
     for col in ["Open", "High", "Low", "Close", "Volume"]:
         if col in raw.columns:
             raw[col] = pd.to_numeric(raw[col], errors="coerce")
