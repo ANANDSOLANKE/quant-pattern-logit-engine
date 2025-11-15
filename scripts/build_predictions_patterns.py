@@ -2,18 +2,20 @@
 #
 # Use the pattern table (pattern_stats_T123.json) to build:
 #   - dist/index.html
-#       * Top T+1 Up patterns (by confidence, with support)
-#       * Top T+1 Down patterns
+#       * Top T+1 Up signals (by confidence, with support)
+#       * Top T+1 Down signals
 #   - dist/stocks/<SYMBOL>.html
 #       * Today's pattern, direction, hit-rate, confidence, support
-#       * Last 10 occurrences of the SAME pattern with actual outcomes
+#       * Last 10 daily signals:
+#           - pattern on that day
+#           - its P_up_T1, confidence, support
+#           - predicted vs actual T+1/T+2/T+3
 #
-# This is a REAL reverse-engineering model:
-#   probabilities are pure historical frequencies for the exact pattern_key.
+# This backtests the model "day by day": for each of last 10 days,
+# what pattern was detected, what probability it gave, and whether it won.
 
 from pathlib import Path
 import json
-import math
 
 import numpy as np
 import pandas as pd
@@ -72,7 +74,7 @@ def build_master_from_per_symbol():
     print(f"Built master file {MASTER_FILE} with {len(master)} rows.")
 
 
-# ---------- bucket helpers (must match build_pattern_table) ----------
+# ---------- bucket helpers (must match build_pattern_table.py) ----------
 
 def bucket_rsi(r):
     if pd.isna(r):
@@ -175,7 +177,7 @@ def compute_basic_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-# ---------- simple mapping from probability to direction + confidence ----------
+# ---------- probability -> direction + confidence ----------
 
 def direction_and_confidence(p_up):
     """
@@ -229,11 +231,11 @@ def render_index(up_rows, down_rows):
         COMMON_STYLE,
         "</style></head><body>",
         "<h1>NSE Pattern Model – T+1 Signals</h1>",
-        "<p class='tag'>This page is powered by a pure pattern table built from your historical data. "
-        "Each signal shows: direction, hit-rate (P_up_T1), confidence (0–100), and support (how many "
-        "times this pattern occurred in the past).</p>",
+        "<p class='tag'>Signals are generated from a pattern table built from your historical data. "
+        "Each row shows today's pattern for that stock: hit-rate P(Up T+1), confidence (0–100) and "
+        "support (how many past occurrences of that pattern exist).</p>",
         "<div class='card'>",
-        "<h2>Strongest T+1 Up patterns</h2>",
+        "<h2>Strongest T+1 Up signals</h2>",
         "<table>",
         "<tr><th>Symbol</th><th>Last Date</th><th>Close</th>"
         "<th>P(Up T+1)%</th><th>Confidence</th><th>Support</th></tr>",
@@ -256,7 +258,7 @@ def render_index(up_rows, down_rows):
         "</table>",
         "</div>",
         "<div class='card'>",
-        "<h2>Strongest T+1 Down patterns</h2>",
+        "<h2>Strongest T+1 Down signals</h2>",
         "<table>",
         "<tr><th>Symbol</th><th>Last Date</th><th>Close</th>"
         "<th>P(Up T+1)%</th><th>Confidence</th><th>Support</th></tr>",
@@ -283,7 +285,7 @@ def render_index(up_rows, down_rows):
     return "\n".join(html)
 
 
-def render_stock_page(row, pattern_info, history_rows):
+def render_stock_page(row, pattern_info_today, history_rows, win_summary):
     html = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'>",
         f"<title>{row['symbol']} – Pattern-based T+1/T+2/T+3</title>",
@@ -300,25 +302,27 @@ def render_stock_page(row, pattern_info, history_rows):
         "</table></div>",
     ]
 
-    cls = conf_class(row["conf_T1"])
+    # Today's signal (T+1/T+2/T+3 from today's pattern)
+    p_up_T2 = pattern_info_today.get("p_up_T2", 0.5)
+    p_up_T3 = pattern_info_today.get("p_up_T3", 0.5)
+    dir_T2, conf_T2 = direction_and_confidence(p_up_T2)
+    dir_T3, conf_T3 = direction_and_confidence(p_up_T3)
+    cls1 = conf_class(row["conf_T1"])
+    cls2 = conf_class(conf_T2)
+    cls3 = conf_class(conf_T3)
+
     html.append("<div class='card'><h2>Today's pattern signal</h2>")
-    html.append("<table><tr><th>Horizon</th><th>Direction</th><th>P(Up)%</th><th>Confidence</th><th>Support</th></tr>")
+    html.append("<table><tr><th>Horizon</th><th>Direction</th>"
+                "<th>P(Up)%</th><th>Confidence</th><th>Support</th></tr>")
     html.append(
         "<tr>"
         "<td>T+1</td>"
         f"<td>{row['dir_T1']}</td>"
-        f"<td class='{cls}'>{row['p_up_T1']*100:0.2f}</td>"
-        f"<td class='{cls}'>{row['conf_T1']:0.1f}</td>"
+        f"<td class='{cls1}'>{row['p_up_T1']*100:0.2f}</td>"
+        f"<td class='{cls1}'>{row['conf_T1']:0.1f}</td>"
         f"<td>{row['support']}</td>"
         "</tr>"
     )
-    # we can show T+2, T+3 from pattern_info if available
-    p_up_T2 = pattern_info.get("p_up_T2", 0.5)
-    p_up_T3 = pattern_info.get("p_up_T3", 0.5)
-    dir_T2, conf_T2 = direction_and_confidence(p_up_T2)
-    dir_T3, conf_T3 = direction_and_confidence(p_up_T3)
-    cls2 = conf_class(conf_T2)
-    cls3 = conf_class(conf_T3)
     html.append(
         "<tr>"
         "<td>T+2</td>"
@@ -338,28 +342,59 @@ def render_stock_page(row, pattern_info, history_rows):
         "</tr>"
     )
     html.append("</table>")
-    html.append("<p class='tag'>Probabilities and confidence are derived purely from your historical data "
-                "for this exact pattern signature. Support = how many past occurrences of the same pattern exist.</p>")
+    html.append("<p class='tag'>Probabilities and confidence are derived from your historical data "
+                "for this exact pattern signature. Support = how many past occurrences exist.</p>")
     html.append("</div>")
 
-    # Last-10 occurrences table (REAL examples)
+    # Summary of last-10 daily signals
+    html.append("<div class='card'><h2>Last 10 daily signals – T+1 performance</h2>")
+    html.append("<table><tr><th>Signals</th><th>Wins</th><th>Win %</th></tr>")
+    if win_summary["signals"] > 0:
+        win_pct = win_summary["wins"] / win_summary["signals"] * 100.0
+    else:
+        win_pct = 0.0
+    html.append(
+        f"<tr><td>{win_summary['signals']}</td>"
+        f"<td>{win_summary['wins']}</td>"
+        f"<td>{win_pct:0.1f}</td></tr>"
+    )
+    html.append("</table>")
+    html.append("<p class='tag'>Each signal uses the pattern that existed on that day, "
+                "with its own probability and support from the pattern table.</p>")
+    html.append("</div>")
+
+    # Detailed last-10 daily signals table
     if history_rows:
-        html.append("<div class='card'><h2>Last 10 occurrences of the same pattern</h2>")
-        html.append("<table><tr><th>Date</th><th>Close at signal</th>"
-                    "<th>Actual T+1</th><th>Actual T+2</th><th>Actual T+3</th></tr>")
+        html.append("<div class='card'><h2>Last 10 daily signals (detailed)</h2>")
+        html.append(
+            "<table><tr>"
+            "<th>Date</th><th>Close at signal</th>"
+            "<th>Pattern</th><th>P(Up T+1)%</th><th>Conf</th><th>Support</th>"
+            "<th>Pred T+1</th><th>Actual T+1</th><th>Win?</th>"
+            "<th>Actual T+2</th><th>Actual T+3</th>"
+            "</tr>"
+        )
         for r in history_rows:
+            cls = conf_class(r["conf_T1"])
             html.append(
                 "<tr>"
                 f"<td>{r['date']}</td>"
                 f"<td>{r['close']:.2f}</td>"
+                f"<td>{r['pattern_key']}</td>"
+                f"<td class='{cls}'>{r['p_up_T1']*100:0.1f}</td>"
+                f"<td class='{cls}'>{r['conf_T1']:0.1f}</td>"
+                f"<td>{r['support']}</td>"
+                f"<td>{r['dir_T1']}</td>"
                 f"<td>{r['act_T1']}</td>"
+                f"<td>{'Yes' if r['win_T1'] else 'No'}</td>"
                 f"<td>{r['act_T2']}</td>"
                 f"<td>{r['act_T3']}</td>"
                 "</tr>"
             )
         html.append("</table>")
-        html.append("<p class='tag'>These rows show real historical outcomes whenever the pattern "
-                    "matched today's configuration. No simulation, no fake data.</p>")
+        html.append("<p class='tag'>This table shows, day by day, what pattern was seen, "
+                    "what the pattern table predicted for T+1, and what actually happened "
+                    "for T+1/T+2/T+3.</p>")
         html.append("</div>")
 
     html.append("</body></html>")
@@ -397,7 +432,7 @@ def main():
 
     summary_rows = []
 
-    MIN_SUPPORT_FOR_LISTING = 20  # you can tune this
+    MIN_SUPPORT_FOR_LISTING = 20  # tune as you like
 
     for sym, g in df.groupby("Symbol", sort=False):
         g_ind = compute_basic_indicators(g)
@@ -414,7 +449,7 @@ def main():
         n = len(g_ind)
         pattern_keys = [None] * n
 
-        # compute pattern_key for each eligible index
+        # pattern for each eligible index
         for i in range(3, n - 3):
             r_prev = ret1.iloc[i - 1]
             r_today = ret1.iloc[i]
@@ -456,17 +491,17 @@ def main():
         g_ind["act_T2"] = act_T2
         g_ind["act_T3"] = act_T3
 
-        # last row (today)
+        # today's row (last available)
         last = g_ind.iloc[-1]
         pk_today = last["pattern_key"]
         if pk_today is None or pk_today not in pattern_stats:
-            # no pattern stats; skip listing but you could still write a minimal page
+            # no valid pattern for today; skip from index but you could still build a page if you want
             continue
 
-        pat_info = pattern_stats[pk_today]
-        support = pat_info["count"]
-        p_up_T1 = pat_info["p_up_T1"]
-        dir_T1, conf_T1 = direction_and_confidence(p_up_T1)
+        pat_today = pattern_stats[pk_today]
+        support_today = pat_today["count"]
+        p_up_T1_today = pat_today["p_up_T1"]
+        dir_T1_today, conf_T1_today = direction_and_confidence(p_up_T1_today)
 
         row_info = {
             "symbol": sym,
@@ -476,34 +511,58 @@ def main():
             "low": float(last["Low"]),
             "close": float(last["Close"]),
             "volume": float(last["Volume"]),
-            "p_up_T1": float(p_up_T1),
-            "dir_T1": dir_T1,
-            "conf_T1": float(conf_T1),
-            "support": int(support),
+            "p_up_T1": float(p_up_T1_today),
+            "dir_T1": dir_T1_today,
+            "conf_T1": float(conf_T1_today),
+            "support": int(support_today),
         }
         summary_rows.append(row_info)
 
-        # last 10 occurrences of SAME pattern_key for this symbol
-        same_pat = g_ind[g_ind["pattern_key"] == pk_today].copy()
-        same_pat = same_pat.dropna(subset=["act_T1", "act_T2", "act_T3"])
-        same_pat = same_pat.iloc[:-3]  # exclude last row if future data incomplete
-        last10 = same_pat.tail(10)
-
-        history_rows = [
-            {
-                "date": r["Date"].strftime("%Y-%m-%d"),
-                "close": float(r["Close"]),
-                "act_T1": r["act_T1"],
-                "act_T2": r["act_T2"],
-                "act_T3": r["act_T3"],
-            }
-            for _, r in last10.iterrows()
+        # last 10 valid daily signals: each with its own pattern
+        valid_indices = [
+            i for i in range(3, n - 3)
+            if g_ind.loc[i, "pattern_key"] is not None
+               and g_ind.loc[i, "pattern_key"] in pattern_stats
+               and g_ind.loc[i, "act_T1"] in ("Up", "Down")
         ]
+        last10_idx = valid_indices[-10:]
 
-        stock_html = render_stock_page(row_info, pat_info, history_rows)
+        history_rows = []
+        win_summary = {"signals": 0, "wins": 0}
+
+        for i in last10_idx:
+            pk = g_ind.loc[i, "pattern_key"]
+            pat = pattern_stats[pk]
+            p_up = pat["p_up_T1"]
+            dir_T1, conf_T1 = direction_and_confidence(p_up)
+            support = pat["count"]
+            act1 = g_ind.loc[i, "act_T1"]
+            act2 = g_ind.loc[i, "act_T2"]
+            act3 = g_ind.loc[i, "act_T3"]
+            win_T1 = (dir_T1 == act1)
+
+            history_rows.append({
+                "date": g_ind.loc[i, "Date"].strftime("%Y-%m-%d"),
+                "close": float(g_ind.loc[i, "Close"]),
+                "pattern_key": pk,
+                "p_up_T1": float(p_up),
+                "conf_T1": float(conf_T1),
+                "support": int(support),
+                "dir_T1": dir_T1,
+                "act_T1": act1,
+                "win_T1": bool(win_T1),
+                "act_T2": act2,
+                "act_T3": act3,
+            })
+
+            win_summary["signals"] += 1
+            if win_T1:
+                win_summary["wins"] += 1
+
+        stock_html = render_stock_page(row_info, pat_today, history_rows, win_summary)
         (stocks_dir / f"{sym}.html").write_text(stock_html, encoding="utf-8")
 
-    # Filter by support, then split into Up and Down lists
+    # landing page
     strong = [r for r in summary_rows if r["support"] >= MIN_SUPPORT_FOR_LISTING]
 
     up_rows = [r for r in strong if r["dir_T1"] == "Up"]
@@ -512,7 +571,6 @@ def main():
     up_rows.sort(key=lambda r: (r["conf_T1"], r["p_up_T1"]), reverse=True)
     down_rows.sort(key=lambda r: (r["conf_T1"], 1 - r["p_up_T1"]), reverse=True)
 
-    # limit rows if you like (e.g., top 200)
     up_rows = up_rows[:200]
     down_rows = down_rows[:200]
 
