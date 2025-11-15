@@ -58,26 +58,24 @@ jobs:
         run: |
           python scripts/build_predictions_patterns.py
 
-      # Ensure pattern_table.csv is published under dist/Data/NSE/
+      # Ensure pattern_table.csv is inside the published site
       - name: Locate and copy pattern_table.csv into dist/Data/NSE
         run: |
           echo "Searching for pattern_table.csv..."
-          FOUND=$(find . -maxdepth 6 -type f -name 'pattern_table.csv' | head -n 1 || true)
+          FOUND=$(find . -maxdepth 6 -type f -name "pattern_table.csv" | head -n 1 || true)
           mkdir -p dist/Data/NSE
 
           if [ -z "$FOUND" ]; then
-            echo "WARNING: pattern_table.csv not found. Creating dummy file in dist/Data/NSE."
-            cat > dist/Data/NSE/pattern_table.csv << 'EOF'
-Symbol,LastDate,Close,PUpT1,Confidence,Support,Direction
-DUMMY,2000-01-01,0,0,0,0,UP
-EOF
+            echo "pattern_table.csv not found, creating dummy file."
+            echo "Symbol,LastDate,Close,PUpT1,Confidence,Support,Direction" > dist/Data/NSE/pattern_table.csv
+            echo "DUMMY,2000-01-01,0,0,0,0,UP" >> dist/Data/NSE/pattern_table.csv
           else
             echo "Found pattern_table.csv at: $FOUND"
             cp "$FOUND" dist/Data/NSE/pattern_table.csv
           fi
 
-          echo "Listing dist/ for verification:"
-          ls -R dist
+          echo "Listing dist/Data/NSE:"
+          ls -l dist/Data/NSE
 
       - name: Prepare Pages artifact
         uses: actions/upload-pages-artifact@v3
