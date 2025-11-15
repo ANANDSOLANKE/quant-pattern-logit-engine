@@ -1,10 +1,7 @@
 name: Build & Deploy – NSE Pattern Model
 
 on:
-  # Manual trigger from GitHub UI
   workflow_dispatch:
-
-  # Schedule: Mon–Fri at 10:15 UTC (~15:45 IST, after NSE close)
   schedule:
     - cron: '15 10 * * 1-5'
 
@@ -44,10 +41,7 @@ jobs:
         continue-on-error: true
         run: |
           if [ -f scripts/sync_nse_data.py ]; then
-            echo "Running scripts/sync_nse_data.py ..."
             python scripts/sync_nse_data.py
-          else
-            echo "scripts/sync_nse_data.py not found – skipping data sync."
           fi
 
       - name: Build pattern table (T+1/T+2/T+3)
@@ -57,25 +51,6 @@ jobs:
       - name: Build prediction pages from patterns
         run: |
           python scripts/build_predictions_patterns.py
-
-      # Ensure pattern_table.csv is inside the published site
-      - name: Locate and copy pattern_table.csv into dist/Data/NSE
-        run: |
-          echo "Searching for pattern_table.csv..."
-          FOUND=$(find . -maxdepth 6 -type f -name "pattern_table.csv" | head -n 1 || true)
-          mkdir -p dist/Data/NSE
-
-          if [ -z "$FOUND" ]; then
-            echo "pattern_table.csv not found, creating dummy file."
-            echo "Symbol,LastDate,Close,PUpT1,Confidence,Support,Direction" > dist/Data/NSE/pattern_table.csv
-            echo "DUMMY,2000-01-01,0,0,0,0,UP" >> dist/Data/NSE/pattern_table.csv
-          else
-            echo "Found pattern_table.csv at: $FOUND"
-            cp "$FOUND" dist/Data/NSE/pattern_table.csv
-          fi
-
-          echo "Listing dist/Data/NSE:"
-          ls -l dist/Data/NSE
 
       - name: Prepare Pages artifact
         uses: actions/upload-pages-artifact@v3
