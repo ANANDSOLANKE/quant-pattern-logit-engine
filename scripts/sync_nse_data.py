@@ -1,4 +1,9 @@
 # scripts/sync_nse_data.py
+#
+# Incremental NSE data sync with "holiday / non-trading day" shortcut.
+# - Uses Data/Historical/<SYMBOL>.csv as base
+# - Downloads ONLY missing days after the last Date
+# - Before looping all symbols, probes 1 symbol; if no new bar -> assume holiday and exit.
 
 from pathlib import Path
 from datetime import date, timedelta
@@ -39,12 +44,20 @@ def _ensure_date_column(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def download_and_update_symbol(symbol: str) -> pd.DataFrame:
+def download_incremental(ticker: str, start: date, today: date) -> pd.DataFrame:
+    return yf.download(
+        ticker,
+        start=start.isoformat(),
+        end=(today + timedelta(days=1)).isoformat(),
+        auto_adjust=False,
+        progress=False,
+    )
+
+
+def download_and_update_symbol(symbol: str, today: date) -> pd.DataFrame:
     """Update one symbol. Only downloads data after last saved date."""
     ticker = f"{symbol}.NS"
     hist_path = HIST_DIR / f"{symbol}.csv"
-
-    today = date.today()
 
     # -------- load existing history (if present) --------
     if hist_path.exists():
@@ -53,21 +66,14 @@ def download_and_update_symbol(symbol: str) -> pd.DataFrame:
         old = old.sort_values("Date")
         last_date = old["Date"].max().date()
 
-        # already up-to-date: no download, just reuse
+        # if already up-to-date for this symbol, just reuse
         if last_date >= today:
             df_all = old
             print(f"{symbol}: already up to date (last date {last_date})")
         else:
             start = last_date + timedelta(days=1)
             print(f"{symbol}: updating from {start} to {today}")
-
-            df_new = yf.download(
-                ticker,
-                start=start.isoformat(),
-                end=(today + timedelta(days=1)).isoformat(),
-                auto_adjust=False,
-                progress=False,
-            )
+            df_new = download_incremental(ticker, start, today)
 
             if df_new.empty:
                 print(f"{symbol}: no new rows from yfinance")
@@ -77,7 +83,7 @@ def download_and_update_symbol(symbol: str) -> pd.DataFrame:
                 df_new = _ensure_date_column(df_new)
 
                 df_new["Symbol"] = symbol
-                df_new["Sector"] = ""   # optional – fill later if you have sector data
+                df_new["Sector"] = ""   # optional – fill later with sector mapping
                 df_new["Index"] = "NSE"
 
                 df_new = df_new[[
@@ -88,15 +94,9 @@ def download_and_update_symbol(symbol: str) -> pd.DataFrame:
                 df_all = pd.concat([old, df_new], ignore_index=True)
 
     else:
-        # no local history: fall back to full download from START_DATE
+        # no local history: download full series from START_DATE
         print(f"{symbol}: no local history, downloading full series from {START_DATE}")
-        df_new = yf.download(
-            ticker,
-            start=START_DATE.isoformat(),
-            end=(today + timedelta(days=1)).isoformat(),
-            auto_adjust=False,
-            progress=False,
-        )
+        df_new = download_incremental(ticker, START_DATE, today)
 
         if df_new.empty:
             print(f"{symbol}: no data from yfinance at all, skipping")
@@ -135,18 +135,68 @@ def download_and_update_symbol(symbol: str) -> pd.DataFrame:
     return df_all
 
 
+def probe_non_trading_day(symbol: str, today: date) -> bool:
+    """
+    Check a single 'probe' symbol to decide whether today has a new bar.
+    Returns True if today looks like a non-trading day (holiday/weekend),
+    False otherwise.
+    """
+    hist_path = HIST_DIR / f"{symbol}.csv"
+    ticker = f"{symbol}.NS"
+
+    if not hist_path.exists():
+        # No history yet: can't detect holiday, let normal loop handle it.
+        print(f"Probe: {symbol} has no local history, skipping holiday check.")
+        return False
+
+    probe_df = pd.read_csv(hist_path, parse_dates=["Date"])
+    probe_df = _ensure_date_column(probe_df)
+    probe_df = probe_df.sort_values("Date")
+    last_date = probe_df["Date"].max().date()
+
+    # if we already have today's bar for probe, we definitely should update others
+    if last_date >= today:
+        print(f"Probe: {symbol} already has data for {last_date}, not a holiday.")
+        return False
+
+    start = last_date + timedelta(days=1)
+    print(f"Probe: checking {symbol} from {start} to {today} for holiday detection...")
+    df_new = download_incremental(ticker, start, today)
+
+    if df_new.empty:
+        print(f"Probe: no new rows for {symbol}. Assuming {today} is a non-trading day (holiday/weekend).")
+        return True
+
+    print(f"Probe: found new rows for {symbol}. Market is open, continuing full update.")
+    return False
+
+
 def main():
     if not SYMBOLS_FILE.exists():
         raise SystemExit(f"Missing {SYMBOLS_FILE}")
 
     syms = pd.read_csv(SYMBOLS_FILE)["symbol"].dropna().astype(str).unique()
+    syms = [s.strip().upper() for s in syms if s.strip()]
+    if not syms:
+        raise SystemExit("No symbols found in NSE_symbols.csv")
 
+    today = date.today()
+
+    # ---------- HOLIDAY SHORTCUT ----------
+    # Use the first symbol as a probe to detect if today has a new bar.
+    probe_symbol = syms[0]
+    try:
+        if probe_non_trading_day(probe_symbol, today):
+            print("Holiday/non-trading day detected. Skipping full NSE update.")
+            return
+    except Exception as e:
+        # If anything goes wrong during probe, log and fall back to normal behaviour
+        print(f"Probe failed with error {e!r}, continuing with full update loop.")
+
+    # ---------- NORMAL UPDATE LOOP ----------
     all_frames = []
     for s in syms:
-        s = s.strip().upper()
-        if not s:
-            continue
-        df = download_and_update_symbol(s)
+        df = download_and_update_symbol(s, today)
         if not df.empty:
             all_frames.append(df)
 
